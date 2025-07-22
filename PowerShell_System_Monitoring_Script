@@ -1,0 +1,118 @@
+# Email settings (update these)
+$smtpServer = "smtp.example.com"
+$smtpPort = 587
+$smtpUser = "your_email@example.com"
+$smtpPassword = "your_email_password"
+$emailFrom = "your_email@example.com"
+$emailTo = "alert_recipient@example.com"
+$emailSubject = "System Alert - High Resource Utilization on $(hostname)"
+
+# Log file location
+$logFile = "$env:USERPROFILE\system_monitor_log.txt"
+
+# Threshold (in percent)
+$threshold = 85
+
+# === FUNCTIONS ===
+
+function Send-AlertEmail($body) {
+    try {
+        $securePass = ConvertTo-SecureString $smtpPassword -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($smtpUser, $securePass)
+        Send-MailMessage -From $emailFrom -To $emailTo -Subject $emailSubject -Body $body -SmtpServer $smtpServer -Port $smtpPort -Credential $cred -UseSsl
+        Write-Host "Alert email sent."
+    }
+    catch {
+        Write-Host "Failed to send email: $_"
+    }
+}
+
+function Get-CPUUsage {
+    # Get CPU load percentage over last 1 second
+    $cpu = Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select-Object -ExpandProperty Average
+    return [math]::Round($cpu,2)
+}
+
+function Get-MemoryUsage {
+    $os = Get-CimInstance Win32_OperatingSystem
+    $total = $os.TotalVisibleMemorySize
+    $free = $os.FreePhysicalMemory
+    $usedPercent = 100 * ($total - $free) / $total
+    return [math]::Round($usedPercent,2)
+}
+
+function Get-DiskUsage {
+    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"
+    $diskAlerts = @()
+    $diskUsages = @()
+    foreach ($disk in $disks) {
+        $usedPercent = 100 * ($disk.Size - $disk.FreeSpace) / $disk.Size
+        $usedPercentRounded = [math]::Round($usedPercent,2)
+        $diskUsages += "$($disk.DeviceID): $usedPercentRounded`%"
+        if ($usedPercentRounded -gt $threshold) {
+            $diskAlerts += "$($disk.DeviceID) usage at $usedPercentRounded`%"
+        }
+    }
+    return @{ Usages = $diskUsages; Alerts = $diskAlerts }
+}
+
+# === MAIN SCRIPT ===
+
+while ($true) {
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $cpuUsage = Get-CPUUsage
+    $memUsage = Get-MemoryUsage
+    $diskData = Get-DiskUsage
+    $diskUsages = $diskData.Usages
+    $diskAlerts = $diskData.Alerts
+
+    $logEntry = @"
+[$timestamp] CPU Usage: $cpuUsage% | Memory Usage: $memUsage% | Disk Usage: $( $diskUsages -join ', ' )
+"@
+
+    # Log to file
+    Add-Content -Path $logFile -Value $logEntry
+
+    # Check thresholds
+    $alerts = @()
+    if ($cpuUsage -gt $threshold) {
+        $alerts += "CPU usage high: $cpuUsage`%"
+    }
+    if ($memUsage -gt $threshold) {
+        $alerts += "Memory usage high: $memUsage`%"
+    }
+    if ($diskAlerts.Count -gt 0) {
+        $alerts += $diskAlerts
+    }
+
+    if ($alerts.Count -gt 0) {
+        $alertBody = "ALERT on $(hostname) at $timestamp:`n" + ($alerts -join "`n") + "`n`nFull stats:`n$logEntry"
+        Write-Host $alertBody -ForegroundColor Red
+        Send-AlertEmail -body $alertBody
+    }
+    else {
+        Write-Host "$timestamp - All usage under threshold."
+    }
+
+    # Wait 30 minutes (1800 seconds)
+    Start-Sleep -Seconds 1800
+}
+
+
+//How to use:
+1>Update the email configuration ($smtpServer, $smtpUser, $smtpPassword, $emailFrom, $emailTo) with your SMTP server details and recipient.
+
+2>Save the script as Monitor-System.ps1.
+
+3>Run it in PowerShell//
+
+4>Leave it running, or set it up as a scheduled task for persistent monitoring.
+
+What it does:
+1>Every 30 minutes, it collects CPU, Memory, and Disk usage.
+
+2>Logs stats to a file at C:\Users\<YourUser>\system_monitor_log.txt.
+
+3>If any usage exceeds 85%, it prints an alert to console and sends an email.
+
+Otherwise, it logs normal stats silently.
