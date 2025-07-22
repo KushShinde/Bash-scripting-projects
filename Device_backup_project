@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# === CONFIGURATION ===
+
+# Directories or files to backup (space-separated)
+BACKUP_SOURCES=(
+    "/path/to/important/dir1"
+    "/path/to/important/file2"
+)
+
+# Backup destination directory
+BACKUP_DEST="$HOME/backup"
+
+# Log file
+LOG_FILE="$BACKUP_DEST/backup_$(date +'%Y%m%d_%H%M%S').log"
+
+# Email settings
+EMAIL_TO="recipient@example.com"
+EMAIL_SUBJECT="Backup Log - $(hostname) - $(date +'%Y-%m-%d %H:%M:%S')"
+
+# File storing last full backup date for incremental logic
+LAST_FULL_BACKUP_FILE="$BACKUP_DEST/.last_full_backup"
+
+# Compression command
+COMPRESS_CMD="tar czf"
+
+# Temporary directory for incremental backup list
+TMP_INC_LIST="$BACKUP_DEST/inc_list.txt"
+
+# Number of days between full backups
+FULL_BACKUP_INTERVAL_DAYS=7
+
+# === FUNCTIONS ===
+
+log() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+send_mail() {
+    if command -v mail >/dev/null 2>&1; then
+        mail -s "$EMAIL_SUBJECT" "$EMAIL_TO" < "$LOG_FILE"
+        log "Email sent to $EMAIL_TO"
+    else
+        log "Mail command not found. Skipping email."
+    fi
+}
+
+perform_full_backup() {
+    local archive_name="full_backup_$(date +'%Y%m%d_%H%M%S').tar.gz"
+    log "Starting FULL backup..."
+    mkdir -p "$BACKUP_DEST"
+    $COMPRESS_CMD "$BACKUP_DEST/$archive_name" "${BACKUP_SOURCES[@]}" >> "$LOG_FILE" 2>&1
+    if [ $? -eq 0 ]; then
+        log "Full backup completed: $archive_name"
+        date +%s > "$LAST_FULL_BACKUP_FILE"
+    else
+        log "Full backup failed!"
+    fi
+}
+
+perform_incremental_backup() {
+    log "Starting INCREMENTAL backup..."
+
+    if [ ! -f "$LAST_FULL_BACKUP_FILE" ]; then
+        log "No record of last full backup found. Performing full backup instead."
+        perform_full_backup
+        return
+    fi
+
+    local last_full_backup_ts
+    last_full_backup_ts=$(cat "$LAST_FULL_BACKUP_FILE")
+
+    # Find files modified since last full backup
+    > "$TMP_INC_LIST"
+    for path in "${BACKUP_SOURCES[@]}"; do
+        if [ -e "$path" ]; then
+            find "$path" -type f -newermt "@$last_full_backup_ts" >> "$TMP_INC_LIST"
+        else
+            log "Warning: Path not found: $path"
+        fi
+    done
+
+    if [ ! -s "$TMP_INC_LIST" ]; then
+        log "No changes detected since last full backup. Skipping incremental backup."
+        return
+    fi
+
+    local archive_name="incremental_backup_$(date +'%Y%m%d_%H%M%S').tar.gz"
+    tar czf "$BACKUP_DEST/$archive_name" -T "$TMP_INC_LIST" >> "$LOG_FILE" 2>&1
+
+    if [ $? -eq 0 ]; then
+        log "Incremental backup completed: $archive_name"
+    else
+        log "Incremental backup failed!"
+    fi
+
+    rm -f "$TMP_INC_LIST"
+}
+
+# === SCRIPT START ===
+
+mkdir -p "$BACKUP_DEST"
+
+# Decide if full or incremental backup based on interval
+if [ ! -f "$LAST_FULL_BACKUP_FILE" ]; then
+    log "No previous full backup found. Running full backup."
+    perform_full_backup
+else
+    last_full_backup_ts=$(cat "$LAST_FULL_BACKUP_FILE")
+    now_ts=$(date +%s)
+    days_since_full=$(( (now_ts - last_full_backup_ts) / 86400 ))
+
+    if (( days_since_full >= FULL_BACKUP_INTERVAL_DAYS )); then
+        log "More than $FULL_BACKUP_INTERVAL_DAYS days since last full backup. Running full backup."
+        perform_full_backup
+    else
+        perform_incremental_backup
+    fi
+fi
+
+# Send log by email
+send_mail
+
+exit 0
